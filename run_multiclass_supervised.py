@@ -8,7 +8,7 @@ import numpy as np
 import torch.nn as nn
 
 import pytorch_lightning as pl
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import WandbLogger # use wandb-logger
 from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
@@ -30,6 +30,8 @@ class LitModel_finetune(pl.LightningModule):
         super().__init__()
         self.args = args
         self.model = model
+        self.validation_step_outputs = []
+        self.test_step_outputs = []
 
     def training_step(self, batch, batch_idx):
         X, y = batch
@@ -44,12 +46,13 @@ class LitModel_finetune(pl.LightningModule):
             convScore = self.model(X)
             step_result = convScore.cpu().numpy()
             step_gt = y.cpu().numpy()
+            self.validation_step_outputs.append((step_result, step_gt))
         return step_result, step_gt
 
-    def validation_epoch_end(self, val_step_outputs):
+    def on_validation_epoch_end(self):#, val_step_outputs=None):
         result = []
         gt = np.array([])
-        for out in val_step_outputs:
+        for out in self.validation_step_outputs:
             result.append(out[0])
             gt = np.append(gt, out[1])
 
@@ -60,6 +63,7 @@ class LitModel_finetune(pl.LightningModule):
         self.log("val_acc", result["accuracy"], sync_dist=True)
         self.log("val_cohen", result["cohen_kappa"], sync_dist=True)
         self.log("val_f1", result["f1_weighted"], sync_dist=True)
+        self.validation_step_outputs.clear()
         print(result)
 
     def test_step(self, batch, batch_idx):
@@ -68,9 +72,11 @@ class LitModel_finetune(pl.LightningModule):
             convScore = self.model(X)
             step_result = convScore.cpu().numpy()
             step_gt = y.cpu().numpy()
+            self.test_step_outputs.append((step_result, step_gt))
         return step_result, step_gt
 
-    def test_epoch_end(self, test_step_outputs):
+    def on_test_epoch_end(self):
+        test_step_outputs = self.test_step_outputs
         result = []
         gt = np.array([])
         for out in test_step_outputs:
@@ -84,7 +90,7 @@ class LitModel_finetune(pl.LightningModule):
         self.log("test_acc", result["accuracy"], sync_dist=True)
         self.log("test_cohen", result["cohen_kappa"], sync_dist=True)
         self.log("test_f1", result["f1_weighted"], sync_dist=True)
-
+        self.test_step_outputs.clear()
         return result
 
     def configure_optimizers(self):
@@ -105,7 +111,7 @@ def prepare_TUEV_dataloader(args):
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
 
-    root = "/srv/local/data/TUH/tuh_eeg_events/v2.0.0/edf"
+    root = "/restricteddata/epilepsia/data/TUEV/edf"
 
     train_files = os.listdir(os.path.join(root, "processed_train"))
     train_sub = list(set([f.split("_")[0] for f in train_files]))
@@ -279,10 +285,10 @@ def supervised(args):
 
     # logger and callbacks
     version = f"{args.dataset}-{args.model}-{args.lr}-{args.batch_size}-{args.sampling_rate}-{args.token_size}-{args.hop_length}"
-    logger = TensorBoardLogger(
+    logger = WandbLogger(
         save_dir="./",
         version=version,
-        name="log",
+        #name="log",
     )
     early_stop_callback = EarlyStopping(
         monitor="val_cohen", patience=5, verbose=False, mode="max"
@@ -291,8 +297,8 @@ def supervised(args):
     trainer = pl.Trainer(
         devices=[0],
         accelerator="gpu",
-        strategy=DDPStrategy(find_unused_parameters=False),
-        auto_select_gpus=True,
+        strategy=DDPStrategy(find_unused_parameters=False), # DDP = DistributedDataParallel; runs on multiple GPUs
+        #auto_select_gpus=True,
         benchmark=True,
         enable_checkpointing=True,
         logger=logger,
@@ -323,7 +329,7 @@ if __name__ == "__main__":
                         default=512, help="batch size")
     parser.add_argument("--num_workers", type=int,
                         default=32, help="number of workers")
-    parser.add_argument("--dataset", type=str, default="TUAB", help="dataset")
+    parser.add_argument("--dataset", type=str, default="TUEV", help="dataset")
     parser.add_argument(
         "--model", type=str, default="SPaRCNet", help="which supervised model to use"
     )
